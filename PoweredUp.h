@@ -324,11 +324,15 @@ class PoweredUp {
     // that guess. WeDo only has 2 external ports, so this never needs to be large.
     struct WedoPendingMonitor {
       bool waiting = false;
+      int8_t port = -1; // -1 = whichever port it turns up on; 0/1 = only that port
       uint8_t deviceId = 0;
       RawInputHandler callback;
       const char* label = nullptr;
     };
-    static const uint8_t MAX_WEDO_PENDING = 2;
+    // Two ports, but more than one waiting subscription can be aimed at the same port
+    // (e.g. a port('A') and a port('B') call for the same kind of sensor, plus a
+    // port-less one), so this is deliberately larger than the port count.
+    static const uint8_t MAX_WEDO_PENDING = 4;
     WedoPendingMonitor _wedoPending[MAX_WEDO_PENDING];
 
     BLESlot _slot = BLE_SLOT_INVALID;
@@ -427,6 +431,13 @@ class PoweredUp {
                                RawInputHandler callback);
     void _monitorWedoDevice(int portArg, bool portGiven, uint8_t deviceId, const char* label,
                              RawInputHandler callback);
+    // True if a WeDo port may be configured for deviceId: either the hub has reported
+    // that exact device there, or it hasn't reported anything there yet. A port the hub
+    // says holds something else is never available - reconfiguring it would make a
+    // working sensor report under the wrong device's format.
+    bool _wedoPortAvailable(uint8_t normalizedPort, uint8_t deviceId);
+    void _addWedoPendingMonitor(int8_t port, uint8_t deviceId, RawInputHandler callback,
+                                 const char* label);
     void _resolvePendingMonitors(uint8_t port, uint16_t ioTypeId);
     void _resolveWedoPendingMonitors(uint8_t port, uint8_t deviceId); // port: 1-based
 

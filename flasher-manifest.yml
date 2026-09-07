@@ -43,6 +43,13 @@ examples:
       colour indicates direction, prints tilt sensor readings if one's attached.
     sourceUrl: https://github.com/lemio/esp32_PoweredUp/tree/master/examples/train_hub
 
+  multi_sensor:
+    name: multi_sensor.ino
+    description: >-
+      Two sensors on one WeDo 2.0 hub at once - a tilt sensor on each port plus a
+      distance sensor wherever it turns up, each printing to Serial on its own.
+    sourceUrl: https://github.com/lemio/esp32_PoweredUp/tree/master/examples/multi_sensor
+
   train_remote:
     name: train_remote.ino
     description: >-

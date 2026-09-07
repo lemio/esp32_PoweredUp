@@ -92,6 +92,45 @@ https://github.com/user-attachments/assets/4fce5972-02e1-4a69-b312-a5ac862f64a9
 
 See [`examples/train_hub`](examples/train_hub) for the full sketch.
 
+## multi_sensor.ino — several sensors on one hub, each on its own port
+
+Subscribes to more than one sensor on a single hub at the same time and lets the library
+work out which port each one is on. A named port is taken literally, so
+`hub.port('A')` only ever binds to port A. A port-less call like `onDistanceChanged()`
+takes whichever free port the sensor turns up on, and corrects itself once the hub
+reports the attachment. Nothing ever reconfigures a port that already holds a different
+device, so a tilt sensor keeps reporting angles even if a distance subscription is
+registered afterwards.
+
+```cpp
+#include <PoweredUp.h>
+
+PoweredUp hub(nullptr);
+
+void setup() {
+  Serial.begin(115200);
+  hub.connect();
+  hub.port('A').onTiltChanged([](int8_t x, int8_t y){
+    Serial.printf("Tilt angle A: x=%d y=%d\n", x, y);
+  });
+  hub.port('B').onTiltChanged([](int8_t x, int8_t y){
+    Serial.printf("Tilt angle B: x=%d y=%d\n", x, y);
+  });
+  hub.onDistanceChanged([](int8_t distance){
+    Serial.printf("Distance: %d\n", distance);
+  });
+}
+
+void loop() {
+  hub.handleConnection();
+}
+```
+
+Plug and unplug sensors while it runs - the Serial log shows each attach event and which
+port every subscription ends up on.
+
+See [`examples/multi_sensor`](examples/multi_sensor) for the full sketch.
+
 ## train_remote.ino — a Remote Control driving a train hub, with a speed gauge
 
 A LEGO Powered Up Remote Control drives a real train hub: the remote's up/down buttons
@@ -416,6 +455,7 @@ See each example's own section above for a description, code snippet, and demo v
 [button_motor.ino](#button_motorino--a-physical-remote-using-the-esp32s-own-button),
 [sensor_motor.ino](#sensor_motorino--a-motor-and-led-driven-by-a-distance-sensor),
 [train_hub.ino](#train_hubino--a-standalone-train-hub-demo-no-remote-needed),
+[multi_sensor.ino](#multi_sensorino--several-sensors-on-one-hub-each-on-its-own-port),
 [train_remote.ino](#train_remoteino--a-remote-control-driving-a-train-hub-with-a-speed-gauge),
 [wifi_control.ino](#wifi_controlino--driving-a-motor-from-a-web-page-instead-of-ble-input),
 [analog_throttle.ino](#analog_throttleino--a-breadboard-knob-driving-a-real-lego-train).
