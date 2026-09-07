@@ -318,22 +318,25 @@ class PoweredUp {
       const char* label = nullptr; // for the Serial message, e.g. "onDistanceChanged"
     };
 
-    // WeDo 2.0 equivalent of PendingMonitor above - a port-less onDistanceChanged()/
-    // onTiltChanged() call that guessed port A because nothing had attached yet, kept
-    // around so it can be corrected once a real attach event confirms (or contradicts)
-    // that guess. WeDo only has 2 external ports, so this never needs to be large.
-    struct WedoPendingMonitor {
-      bool waiting = false;
+    // Every WeDo 2.0 sensor subscription the sketch has declared, kept for the lifetime
+    // of the object. Unlike LWP3's PendingMonitor above - which is consumed the moment
+    // the right attach event arrives - these are standing declarations ("whenever a tilt
+    // sensor is on port A, call this"). A sensor can be unplugged, swapped and replugged
+    // any number of times, and each attach event re-binds from this list, so the
+    // _wedoDevices/_wedoHandlers pair below is derived state rather than the record of
+    // what the sketch asked for.
+    struct WedoSubscription {
+      bool inUse = false;
       int8_t port = -1; // -1 = whichever port it turns up on; 0/1 = only that port
       uint8_t deviceId = 0;
       RawInputHandler callback;
       const char* label = nullptr;
     };
-    // Two ports, but more than one waiting subscription can be aimed at the same port
-    // (e.g. a port('A') and a port('B') call for the same kind of sensor, plus a
-    // port-less one), so this is deliberately larger than the port count.
-    static const uint8_t MAX_WEDO_PENDING = 4;
-    WedoPendingMonitor _wedoPending[MAX_WEDO_PENDING];
+    // Two ports, but more than one subscription can be aimed at the same port (e.g. a
+    // port('A') and a port('B') call for the same kind of sensor, plus a port-less one),
+    // so this is deliberately larger than the port count.
+    static const uint8_t MAX_WEDO_SUBSCRIPTIONS = 4;
+    WedoSubscription _wedoSubscriptions[MAX_WEDO_SUBSCRIPTIONS];
 
     BLESlot _slot = BLE_SLOT_INVALID;
 
@@ -436,10 +439,16 @@ class PoweredUp {
     // says holds something else is never available - reconfiguring it would make a
     // working sensor report under the wrong device's format.
     bool _wedoPortAvailable(uint8_t normalizedPort, uint8_t deviceId);
-    void _addWedoPendingMonitor(int8_t port, uint8_t deviceId, RawInputHandler callback,
-                                 const char* label);
+    // Records a standing subscription, replacing one that already covers the same port
+    // and device. Returns its index, or -1 if the table is full.
+    int _addWedoSubscription(int8_t port, uint8_t deviceId, RawInputHandler callback,
+                              const char* label);
+    void _configureWedoPort(uint8_t normalizedPort, const WedoSubscription& sub);
+    // Picks the subscription that should own a port now that the hub has said what's
+    // plugged into it, and configures the port for it. Called on every attach event, so
+    // a replugged or swapped sensor is always re-bound from scratch.
+    void _bindWedoPort(uint8_t normalizedPort);
     void _resolvePendingMonitors(uint8_t port, uint16_t ioTypeId);
-    void _resolveWedoPendingMonitors(uint8_t port, uint8_t deviceId); // port: 1-based
 
     RemoteButtonHandle& _ensureRemoteButtonGroup(int portArg, bool portGiven);
     void _handleRemoteButtonRaw(RemoteButtonHandle& group, int8_t* value, int size);

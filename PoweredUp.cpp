@@ -461,30 +461,80 @@ bool PoweredUp::_wedoPortAvailable(uint8_t normalizedPort, uint8_t deviceId) {
          _wedoAttachedDevice[normalizedPort] == deviceId;
 }
 
-// Park a subscription until the right device is actually plugged in. port is -1 for a
-// port-less call (any port will do) or a 0-based port for one that named a port, so
-// _resolveWedoPendingMonitors() can tell "wherever it turns up" from "only there".
-void PoweredUp::_addWedoPendingMonitor(int8_t port, uint8_t deviceId, RawInputHandler callback,
-                                        const char* label) {
-  for (uint8_t i = 0; i < MAX_WEDO_PENDING; i++) {
-    if (!_wedoPending[i].waiting) {
-      _wedoPending[i].waiting = true;
-      _wedoPending[i].port = port;
-      _wedoPending[i].deviceId = deviceId;
-      _wedoPending[i].callback = callback;
-      _wedoPending[i].label = label;
-      return;
+// Records what the sketch asked for. Calling onTiltChanged() twice for the same port
+// replaces the callback rather than filling up the table.
+int PoweredUp::_addWedoSubscription(int8_t port, uint8_t deviceId, RawInputHandler callback,
+                                     const char* label) {
+  int freeSlot = -1;
+  for (uint8_t i = 0; i < MAX_WEDO_SUBSCRIPTIONS; i++) {
+    if (_wedoSubscriptions[i].inUse) {
+      if (_wedoSubscriptions[i].port == port && _wedoSubscriptions[i].deviceId == deviceId) {
+        _wedoSubscriptions[i].callback = callback;
+        _wedoSubscriptions[i].label = label;
+        return i;
+      }
+    } else if (freeSlot < 0) {
+      freeSlot = i;
     }
   }
-  printf("%s: no room for another waiting WeDo subscription (max %d)\n", label, MAX_WEDO_PENDING);
+  if (freeSlot < 0) {
+    printf("%s: no room for another WeDo subscription (max %d)\n", label, MAX_WEDO_SUBSCRIPTIONS);
+    return -1;
+  }
+  _wedoSubscriptions[freeSlot].inUse = true;
+  _wedoSubscriptions[freeSlot].port = port;
+  _wedoSubscriptions[freeSlot].deviceId = deviceId;
+  _wedoSubscriptions[freeSlot].callback = callback;
+  _wedoSubscriptions[freeSlot].label = label;
+  return freeSlot;
+}
+
+void PoweredUp::_configureWedoPort(uint8_t normalizedPort, const WedoSubscription& sub) {
+  // Safe to call while a notification callback is running (which is where _bindWedoPort()
+  // reaches this from): writePortDefinition() goes through writeCommand()/bleWriteCommand(),
+  // which queues the write and lets bleHandleConnections() send it from the main loop.
+  writePortDefinition(normalizedPort + 1, sub.deviceId, 0, _wedoRangeFormatFor(sub.deviceId));
+  _wedoDevices[normalizedPort] = sub.deviceId;
+  _wedoHandlers[normalizedPort] = sub.callback;
+}
+
+void PoweredUp::_bindWedoPort(uint8_t normalizedPort) {
+  if (normalizedPort >= 2) {
+    return;
+  }
+  uint8_t deviceId = _wedoAttachedDevice[normalizedPort];
+  if (deviceId == 0) {
+    return; // nothing plugged in - nothing to bind
+  }
+
+  int best = -1;
+  for (uint8_t i = 0; i < MAX_WEDO_SUBSCRIPTIONS; i++) {
+    const WedoSubscription& s = _wedoSubscriptions[i];
+    if (!s.inUse || s.deviceId != deviceId) {
+      continue;
+    }
+    if (s.port >= 0 && s.port != (int8_t)normalizedPort) {
+      continue; // named a different port - it keeps waiting for that one
+    }
+    // A subscription that named this port beats one that takes any port.
+    if (best < 0 || (_wedoSubscriptions[best].port < 0 && s.port >= 0)) {
+      best = i;
+    }
+  }
+  if (best < 0) {
+    return; // nothing subscribed to this kind of device
+  }
+
+  printf("%s: listening on port %c\n", _wedoSubscriptions[best].label, 'A' + normalizedPort);
+  _configureWedoPort(normalizedPort, _wedoSubscriptions[best]);
 }
 
 void PoweredUp::_monitorWedoDevice(int portArg, bool portGiven, uint8_t deviceId, const char* label,
                                     RawInputHandler callback) {
-  uint8_t p;
+  int8_t wanted = -1; // -1 = no particular port
 
   if (portGiven) {
-    p = _normalizePort(portArg);
+    uint8_t p = _normalizePort(portArg);
     if (p >= 2) {
       printf("%s: WeDo 2.0 only has ports A and B - ignoring this call\n", label);
       return;
@@ -492,94 +542,62 @@ void PoweredUp::_monitorWedoDevice(int portArg, bool portGiven, uint8_t deviceId
     // A named port is taken literally. This used to fall back to the *other* port when
     // the device wasn't on the named one, which quietly handed this callback a port
     // another subscription was already using.
+    wanted = (int8_t)p;
+  }
+
+  int idx = _addWedoSubscription(wanted, deviceId, callback, label);
+  if (idx < 0) {
+    return;
+  }
+
+  // Already know where it is? Bind it now.
+  for (uint8_t p = 0; p < 2; p++) {
+    if ((wanted < 0 || wanted == (int8_t)p) && _wedoAttachedDevice[p] == deviceId) {
+      _configureWedoPort(p, _wedoSubscriptions[idx]);
+      return;
+    }
+  }
+
+  // Otherwise configure a port the hub hasn't claimed for something else, so a sketch
+  // that subscribes before any attach event arrives still works. A port the hub says
+  // holds a different device is never touched - reconfiguring it would make a working
+  // sensor report under the wrong device's format. The subscription stays on file
+  // either way, so the next attach event binds it wherever it really turns up.
+  int8_t guess = -1;
+  if (wanted >= 0) {
+    if (_wedoPortAvailable((uint8_t)wanted, deviceId)) {
+      guess = wanted;
+    }
   } else {
-    p = 2; // 2 = "no port picked yet"
-    for (uint8_t i = 0; i < 2; i++) {
-      if (_wedoAttachedDevice[i] == deviceId) {
-        p = i;
-        break;
+    // Prefer a port no other subscription has claimed, so two port-less calls don't
+    // pile onto the same one.
+    for (uint8_t p = 0; p < 2 && guess < 0; p++) {
+      if (_wedoAttachedDevice[p] == 0 && _wedoDevices[p] == 0) {
+        guess = (int8_t)p;
       }
     }
-    if (p >= 2) {
-      // Nothing matching has attached yet. Only guess at a port the hub hasn't already
-      // said holds something else, so the guess can't reconfigure a sensor that's
-      // physically there and working. Prefer one no other subscription has claimed
-      // either, so two port-less calls don't pile onto the same port.
-      for (uint8_t i = 0; i < 2 && p >= 2; i++) {
-        if (_wedoAttachedDevice[i] == 0 && _wedoDevices[i] == 0) {
-          p = i;
-        }
-      }
-      for (uint8_t i = 0; i < 2 && p >= 2; i++) {
-        if (_wedoAttachedDevice[i] == 0) {
-          p = i;
-        }
+    for (uint8_t p = 0; p < 2 && guess < 0; p++) {
+      if (_wedoAttachedDevice[p] == 0) {
+        guess = (int8_t)p;
       }
     }
   }
 
-  if (!_wedoPortAvailable(p, deviceId)) {
-    // Either the caller named a port that holds a different device, or (for a port-less
-    // call) both ports do. Wait for the expected device to be plugged in rather than
-    // reconfiguring whatever is there now.
-    if (portGiven) {
+  if (guess < 0) {
+    if (wanted >= 0) {
       printf("%s: port %c has a different device attached (type %d) - waiting until the "
-             "expected device is plugged into that port\n", label, 'A' + p, _wedoAttachedDevice[p]);
+             "expected device is plugged into that port\n", label, 'A' + wanted,
+             _wedoAttachedDevice[wanted]);
     } else {
-      printf("%s: both WeDo 2.0 ports already have other devices attached - waiting for the "
-             "expected device to be plugged in\n", label);
+      printf("%s: both WeDo 2.0 ports already have other devices attached - waiting for "
+             "the expected device to be plugged in\n", label);
     }
-    _addWedoPendingMonitor(portGiven ? (int8_t)p : -1, deviceId, callback, label);
     return;
   }
 
-  if (_wedoAttachedDevice[p] != deviceId) {
-    // The port is free to use but the hub hasn't confirmed what's in it - configure it
-    // optimistically (so a subscription set up right after connect() works before any
-    // attach event arrives) and register for correction once the real attach event does
-    // come in, via _handleWedoPortTypeNotification/_resolveWedoPendingMonitors. This is
-    // the WeDo-side equivalent of _monitorWithFallback()'s pending-monitor mechanism.
-    printf("%s: WeDo 2.0 hasn't reported this device yet - using port %c for now, will "
-           "correct automatically once it attaches.\n", label, 'A' + p);
-    _addWedoPendingMonitor(portGiven ? (int8_t)p : -1, deviceId, callback, label);
-  }
-
-  writePortDefinition(p + 1, deviceId, 0, _wedoRangeFormatFor(deviceId));
-  _wedoDevices[p] = deviceId;
-  _wedoHandlers[p] = callback;
-}
-
-// Counterpart to _resolvePendingMonitors() (LWP3) - corrects a port-less
-// onDistanceChanged()/onTiltChanged() call that guessed port A once a real attach event
-// confirms where the device actually is. port is 1-based, matching the port-type
-// characteristic's own numbering.
-void PoweredUp::_resolveWedoPendingMonitors(uint8_t port, uint8_t deviceId) {
-  if (port < 1 || port > 2) {
-    return;
-  }
-  uint8_t idx = port - 1;
-  for (uint8_t i = 0; i < MAX_WEDO_PENDING; i++) {
-    if (!_wedoPending[i].waiting || _wedoPending[i].deviceId != deviceId) {
-      continue;
-    }
-    if (_wedoPending[i].port >= 0 && _wedoPending[i].port != (int8_t)idx) {
-      continue; // this subscription named a different port - it keeps waiting for that one
-    }
-    if (_wedoDevices[idx] != deviceId) {
-      printf("%s: found the expected device on port %d, switching to it\n", _wedoPending[i].label, port);
-      // Safe to call from here even though this runs inside the notification callback -
-      // writePortDefinition() goes through writeCommand()/bleWriteCommand(), which
-      // queues automatically in that context (same reasoning as the LED colour resend
-      // in _handleLwp3Notification's attach handling).
-      writePortDefinition(port, deviceId, 0, _wedoRangeFormatFor(deviceId));
-      _wedoDevices[idx] = deviceId;
-    }
-    // Set outside the branch above: the port may already be configured for this device
-    // (another subscription got there first), and this callback still has to be hooked
-    // up to it.
-    _wedoHandlers[idx] = _wedoPending[i].callback;
-    _wedoPending[i].waiting = false;
-  }
+  printf("%s: WeDo 2.0 hasn't reported this device yet - using port %c for now, will "
+         "correct automatically once it attaches.\n", label, 'A' + guess);
+  _configureWedoPort((uint8_t)guess, _wedoSubscriptions[idx]);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -957,10 +975,17 @@ void PoweredUp::_handleRemoteButtonRaw(RemoteButtonHandle& s, int8_t* value, int
 void PoweredUp::stopMonitoring(int port) {
   uint8_t p = _normalizePort(port);
 
-  // WeDo 2.0 side - client-side only, the protocol has no "stop sending" message.
+  // WeDo 2.0 side - client-side only, the protocol has no "stop sending" message. The
+  // standing subscriptions for this port go too, or the next attach event would rebind
+  // the port right back.
   if (p < 2) {
     _wedoDevices[p] = 0;
     _wedoHandlers[p] = nullptr;
+    for (uint8_t i = 0; i < MAX_WEDO_SUBSCRIPTIONS; i++) {
+      if (_wedoSubscriptions[i].inUse && _wedoSubscriptions[i].port == (int8_t)p) {
+        _wedoSubscriptions[i] = WedoSubscription();
+      }
+    }
   }
 
   // LWP3 side
@@ -993,8 +1018,8 @@ void PoweredUp::stopMonitoring(int port) {
 void PoweredUp::stopMonitoring() {
   _wedoDevices[0] = _wedoDevices[1] = 0;
   _wedoHandlers[0] = _wedoHandlers[1] = nullptr;
-  for (uint8_t i = 0; i < MAX_WEDO_PENDING; i++) {
-    _wedoPending[i] = WedoPendingMonitor();
+  for (uint8_t i = 0; i < MAX_WEDO_SUBSCRIPTIONS; i++) {
+    _wedoSubscriptions[i] = WedoSubscription();
   }
 
   for (uint8_t i = 0; i < MAX_SUBSCRIPTIONS; i++) {
@@ -1378,6 +1403,11 @@ void PoweredUp::_handleWedoPortTypeNotification(uint8_t* data, int size) {
   if (!attached) {
     printf("WeDo device detached from port %d\n", port);
     _wedoAttachedDevice[idx] = 0;
+    // The port's configuration belongs to the device that just left. Standing
+    // subscriptions live in _wedoSubscriptions, so whatever gets plugged in next is
+    // bound from there rather than from whatever happened to be here before.
+    _wedoDevices[idx] = 0;
+    _wedoHandlers[idx] = nullptr;
     return;
   }
 
@@ -1385,25 +1415,14 @@ void PoweredUp::_handleWedoPortTypeNotification(uint8_t* data, int size) {
   printf("WeDo device attached on port %d, device type: %d\n", port, deviceType);
   _wedoAttachedDevice[idx] = deviceType;
 
-  if (_wedoDevices[idx] != 0 && deviceType != 0) {
-    if (_wedoDevices[idx] != deviceType) {
-      // This port was configured for something else - a guess that turned out wrong, or
-      // a swapped sensor. Drop it, or _handleWedoNotification() would keep decoding this
-      // device's readings under the old device's format (a tilt sensor reporting
-      // distances, say).
-      printf("WeDo port %d was configured for device type %d - dropping that, a different "
-             "device is attached now\n", port, _wedoDevices[idx]);
-      _wedoDevices[idx] = 0;
-      _wedoHandlers[idx] = nullptr;
-    } else {
-      // Same device plugged back in. The port definition doesn't survive an unplug, so
-      // resend it - queued rather than sent, since this runs inside the notification
-      // callback (see writeCommand()/bleWriteCommand()).
-      writePortDefinition(port, deviceType, 0, _wedoRangeFormatFor(deviceType));
-    }
-  }
-
-  _resolveWedoPendingMonitors(port, deviceType);
+  // Rebind from scratch on every attach. Clearing first means a port that was
+  // configured for something else can't keep decoding this device's readings under the
+  // old device's format (a tilt sensor reporting distances, say), and rebinding means a
+  // sensor can be unplugged, swapped and replugged any number of times - the port
+  // definition doesn't survive an unplug, so it has to be resent regardless.
+  _wedoDevices[idx] = 0;
+  _wedoHandlers[idx] = nullptr;
+  _bindWedoPort(idx);
 }
 
 void PoweredUp::_handleNotification(uint8_t* data, int size, BLENotificationSource source) {
