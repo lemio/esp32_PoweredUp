@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32-S3 Flash Wizard</title>
+    <title>ESP32 Flash Wizard</title>
     <style>
         * {
             margin: 0;
@@ -122,6 +122,21 @@
 
         .step-indicator.completed .step-label {
             color: #d1d5db;
+        }
+
+        /* Only completed steps are actually navigable (goToStep() only ever goes
+           backward) - active/future steps keep the default cursor so they don't look
+           clickable when clicking them is a silent no-op. */
+        .step-indicator.completed {
+            cursor: pointer;
+        }
+
+        .step-indicator.completed:hover .step-number {
+            background: #9ca3af;
+        }
+
+        .step-indicator.completed:hover .step-label {
+            color: #9ca3af;
         }
 
         .step-label {
@@ -389,6 +404,19 @@
             font-weight: 600;
         }
 
+        .recommended-badge {
+            display: inline-block;
+            font-size: 0.65em;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            color: white;
+            background: #10b981;
+            border-radius: 4px;
+            padding: 2px 6px;
+            vertical-align: middle;
+        }
+
         .firmware-card p {
             font-size: 0.8em;
             color: #6b7280;
@@ -417,6 +445,43 @@
             text-decoration: underline;
         }
 
+        .firmware-card .hardware-link {
+            color: #4b5563;
+            text-decoration: none;
+        }
+
+        .firmware-card .hardware-link:hover {
+            text-decoration: underline;
+        }
+
+        .firmware-card .build-date {
+            display: inline-block;
+            margin-top: 6px;
+            margin-left: 6px;
+            font-size: 0.7em;
+            color: #9ca3af;
+        }
+
+        /* A firmware the connected chip can't run at all (mismatched mcu) - shown
+           grayed out, non-clickable, with a "Requires: ..." note instead of its
+           normal description, rather than just omitted - so it's still visible as an
+           option that exists but doesn't fit this device, not silently missing. */
+        .firmware-card.incompatible {
+            cursor: not-allowed;
+            opacity: 0.5;
+            background: #fafafa;
+        }
+
+        .firmware-card.incompatible:hover {
+            border-color: #e5e7eb;
+        }
+
+        .firmware-card .requires-note {
+            font-size: 0.8em;
+            color: #9ca3af;
+            font-style: italic;
+        }
+
         .variable-input-group {
             margin-bottom: 12px;
         }
@@ -435,7 +500,8 @@
             gap: 8px;
         }
 
-        .variable-input-wrapper input {
+        .variable-input-wrapper input,
+        .variable-input-wrapper select {
             flex: 1;
             padding: 8px 12px;
             border: 1px solid #e5e7eb;
@@ -443,14 +509,17 @@
             font-size: 0.85em;
             font-family: 'SF Mono', Monaco, 'Courier New', monospace;
             transition: all 0.15s ease;
+            background: #fff;
         }
 
-        .variable-input-wrapper input:focus {
+        .variable-input-wrapper input:focus,
+        .variable-input-wrapper select:focus {
             outline: none;
             border-color: #1a1a1a;
         }
 
-        .variable-input-wrapper input:hover {
+        .variable-input-wrapper input:hover,
+        .variable-input-wrapper select:hover {
             border-color: #d1d5db;
         }
 
@@ -548,6 +617,33 @@
         .btn-secondary:disabled {
             opacity: 0.4;
             cursor: not-allowed;
+        }
+
+        /* Shown on nextBtn while connectDevice()/flashFirmware() are running - a
+           disabled button with static "Connecting..." text alone still reads as a
+           frozen page at a glance, especially since the actual sync can take a few
+           seconds. Sits inline before the button's text via .btn-spinner-active's
+           ::before, so it doesn't need its own DOM element. */
+        .btn-spinner-active:disabled {
+            opacity: 0.8;
+            cursor: wait;
+        }
+
+        .btn-spinner-active::before {
+            content: '';
+            display: inline-block;
+            width: 0.9em;
+            height: 0.9em;
+            margin-right: 8px;
+            border: 2px solid rgba(255, 255, 255, 0.4);
+            border-top-color: white;
+            border-radius: 50%;
+            vertical-align: -0.15em;
+            animation: spin 0.7s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
 
         .success-animation {
@@ -719,7 +815,7 @@
 <body>
     <div class="wizard-container">
         <div class="wizard-header">
-            <h1>ESP32-S3 Flash Wizard</h1>
+            <h1>ESP32 Flash Wizard</h1>
             <p class="subtitle" id="wizardSubtitle" style="display: none;"></p>
         </div>
 
@@ -836,7 +932,7 @@
                     <div class="success-checkmark"></div>
                     <h2 style="font-size: 1.5em; margin-bottom: 8px; font-weight: 600;">Flash Complete</h2>
                     <p style="color: #6b7280; font-size: 0.9em;">
-                        Your ESP32-S3 has been successfully flashed
+                        Your device has been successfully flashed
                     </p>
                 </div>
 
@@ -852,6 +948,16 @@
                     </p>
                     <ul id="expectedBehaviorList" style="margin-top: 10px; padding-left: 20px; color: #6b7280; font-size: 0.85em; line-height: 1.7;">
                     </ul>
+                </div>
+
+                <!-- Populated by flashFirmware() only when the flashed firmware has an
+                     mDNS Hostname variable - links straight to the device's own
+                     streaming page instead of leaving the user to type the address
+                     themselves. Shown above the serial output below since it's the
+                     more immediately useful/actionable of the two. -->
+                <div id="streamingLinkBlock" class="expected-result" style="display: none;">
+                    <h4>Streaming Page</h4>
+                    <p><a id="streamingLink" href="#" target="_blank" rel="noopener noreferrer"></a></p>
                 </div>
 
                 <div id="serialMonitorBlock" class="expected-result" style="display: none;">
@@ -877,6 +983,7 @@
     <script type="module">
         import { Transport, ESPLoader } from 'https://unpkg.com/esptool-js@0.5.7/bundle.js';
         import { CONFIG, FIRMWARE_CONFIGS } from './config.js';
+        import { POSIX_TZ_DB, POSIX_TZ_ALIASES } from './posix_tz_db.js';
 
         // ==================== STATE ====================
         
@@ -888,10 +995,22 @@
         let chipInfo = {};
         let isDeviceConnected = false;
         let serialMonitorActive = false;
+        // Set inside connectDevice(), removed inside disconnectDevice() - without
+        // tracking this, every connect attempt (including retries) added another
+        // 'disconnect' listener that never got cleaned up.
+        let deviceDisconnectHandler = null;
 
         // Check URL parameter for password hiding
         const urlParams = new URLSearchParams(window.location.search);
-        const hidePassword = urlParams.get('hidePassword') === 'true';
+        const hidePassword = urlParams.get('hidepassword') === 'true';
+        // esptool-js's Transport tracing (its own `console.log`, not this page's log
+        // panel) - a full hex dump of every single byte read/written. Genuinely useful
+        // when diagnosing a stuck sync, but hundreds of these calls during a normal
+        // connect (sync + chip detection + stub upload) adds real overhead - Chrome's
+        // DevTools console formatting cost is non-trivial per call, especially with
+        // DevTools actually open watching them - so this defaults off and is opt-in via
+        // ?trace=1, not force-enabled unconditionally like it used to be.
+        const tracingEnabled = urlParams.get('trace') === '1';
 
         // ==================== UTILITY FUNCTIONS ====================
         
@@ -905,6 +1024,37 @@
         };
 
         const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+        // Standard ESP32 "classic" auto-reset pulse (DTR->IO0, RTS->EN through the
+        // board's auto-program transistor circuit) - mirrors esptool.py's own
+        // ClassicReset exactly, since that's the algorithm confirmed reliable on
+        // classic UART-bridge boards (CH340/CP210x) via the CLI. Deliberately NOT
+        // index.html's resetIntoBootloader(): that pulse sequence is tuned for
+        // native-USB-JTAG boards (its own comment says so) and, tried here, was
+        // confirmed unreliable on a CH340 board - it doesn't consistently hold IO0
+        // low at the moment EN releases, so the chip sometimes lands back in normal
+        // firmware (SPI_FAST_FLASH_BOOT) instead of the ROM download stub
+        // (DOWNLOAD_BOOT), with no error thrown - esptool-js just times out
+        // syncing against a running application that isn't listening for it.
+        const classicReset = async (t) => {
+            await t.setDTR(false);   // IO0 = HIGH (not selecting download mode yet)
+            await t.setRTS(true);    // EN  = LOW  (assert reset)
+            await sleep(100);
+            await t.setDTR(true);    // IO0 = LOW  (select download mode)
+            await t.setRTS(false);   // EN  = HIGH (release reset - chip boots with IO0 held low)
+            await sleep(100);        // hold IO0 low long enough for the ROM to latch boot-mode selection
+            await t.setDTR(false);   // IO0 = HIGH (release - ROM already latched download mode)
+            await sleep(100);        // let the ROM finish initializing before syncing
+        };
+
+        // classicReset() above is only confirmed to help on an actual CH340 board (the
+        // CYD) - tried unconditionally for every board at one point, it measurably
+        // regressed connecting to this repo's S3 AMOLED boards instead (minutes-long
+        // connects, unreliable post-flash reset - see connectDevice()'s own comment).
+        // So it's gated behind actually seeing WCH's vendor ID, known the moment the
+        // browser grants device access (device.getInfo(), no connection needed yet) -
+        // not applied speculatively to everything just because it *might* be a CYD.
+        const WCH_VENDOR_ID = 0x1A86;
 
         // ==================== SERIAL MONITOR ====================
 
@@ -934,10 +1084,11 @@
 
         // Reads raw (non-SLIP-framed) bytes straight from the same port used for
         // flashing - transport.rawRead() bypasses esptool-js's SLIP packet parsing,
-        // which is only meant for talking to the ROM bootloader/stub. Assumes the
-        // firmware's Serial.begin() matches CONFIG.BAUD_RATE (115200, the standard
-        // Arduino default) - the port was already opened at that rate and is never
-        // changed since romBaudrate === baudrate in this tool's config. On boards
+        // which is only meant for talking to the ROM bootloader/stub. The caller
+        // (flashFirmware()) reopens the port at CONFIG.MONITOR_BAUD_RATE right before
+        // calling this - reading at CONFIG.BAUD_RATE (the flash speed) instead would
+        // just show garbage, since the firmware's own Serial.begin() call runs at a
+        // fixed, different rate esptool has no way to know or negotiate. On boards
         // where resetting causes a real USB re-enumeration (native USB-JTAG/Serial),
         // `transport`/`device` may already be stale by the time this runs - rawRead()
         // fails fast and is caught below rather than crashing the wizard.
@@ -1090,7 +1241,15 @@
                 const input = document.querySelector(`[data-firmware-name="${variable.firmware_name}"]`);
                 if (!input) continue;
 
-                const value = input.value;
+                // For type: "timezone", input.value is the IANA zone name shown in the
+                // dropdown (e.g. "America/New_York") - firmware needs the POSIX TZ
+                // string instead (e.g. "EST5EDT,M3.2.0,M11.1.0"), so look it up here,
+                // right before patching, rather than storing the POSIX string as the
+                // select's own value (which would make same-rule zones like
+                // America/New_York and America/Detroit indistinguishable in the UI).
+                const value = variable.type === 'timezone'
+                    ? (POSIX_TZ_DB[input.value] || POSIX_TZ_DB[POSIX_TZ_ALIASES[input.value]] || 'UTC0')
+                    : input.value;
                 const searchString = variable.firmware_name;
                 const maxLen = variable.max_length || 100;
                 
@@ -1185,23 +1344,140 @@
             }
         };
 
+        // Keyed by firmware key, populated lazily by loadBuildDate() below - avoids
+        // re-fetching the same firmware.bin (just to read a few header bytes' worth
+        // of date) every time renderFirmwareList() re-runs, which happens again after
+        // connecting (see connectDevice()) to apply chip-compatibility gating.
+        const buildDateCache = {};
+
+        // Scans raw firmware.bin bytes for firmwareBuildDate's "|*FW*|" + __DATE__ +
+        // "|*FW*|" pattern (see any example's .cpp) and returns just the date text
+        // between the two markers, both stripped - never shown to the user. Null if
+        // the pattern isn't found (older firmware built before this existed, or a
+        // non-manifest hand entry in config.js with no matching files[]).
+        //
+        // Brackets the date with the marker on BOTH sides rather than relying on a
+        // heuristic backward scan from a single trailing marker - an earlier version
+        // did that (walk backward until a null byte, capped at 24 chars), which
+        // picked up whatever non-zero bytes happened to precede the date in the
+        // binary and rendered as garbage, confirmed in practice: "Built
+        // B\x94p\nBAug  4 2026" instead of "Built Aug 4 2026". The preceding memory
+        // isn't reliably null-padded right up to the string's actual start, so
+        // there's no way to find that boundary without a marker of its own.
+        const extractBuildDate = (buffer) => {
+            const bytes = new Uint8Array(buffer);
+            const marker = new TextEncoder().encode('|*FW*|');
+
+            const findMarker = (fromIndex) => {
+                outer:
+                for (let i = fromIndex; i <= bytes.length - marker.length; i++) {
+                    for (let j = 0; j < marker.length; j++) {
+                        if (bytes[i + j] !== marker[j]) continue outer;
+                    }
+                    return i;
+                }
+                return -1;
+            };
+
+            const firstStart = findMarker(0);
+            if (firstStart < 0) return null;
+            const dateStart = firstStart + marker.length;
+            const secondStart = findMarker(dateStart);
+            if (secondStart < 0) return null;
+            return new TextDecoder().decode(bytes.slice(dateStart, secondStart)).trim();
+        };
+
+        const loadBuildDate = async (key, config) => {
+            if (key in buildDateCache) return buildDateCache[key];
+            const fwFile = config.files?.find(f => f.path.endsWith('firmware.bin'));
+            if (!fwFile) return (buildDateCache[key] = null);
+            try {
+                const response = await fetch(fwFile.path);
+                if (!response.ok) return (buildDateCache[key] = null);
+                const buffer = await response.arrayBuffer();
+                return (buildDateCache[key] = extractBuildDate(buffer));
+            } catch (e) {
+                return (buildDateCache[key] = null);
+            }
+        };
+
+        // esptool-js's chip.CHIP_NAME (e.g. "ESP32-S3") -> the same lowercase,
+        // separator-free form build_and_package.py resolves each firmware's target
+        // board to (e.g. "esp32s3") - see that script's get_board_mcu(). Comparing
+        // these two independently-derived values is what tells a firmware apart from
+        // one the connected chip flat-out can't run vs. one that just fits.
+        const normalizeChipToMcu = (chipName) => chipName ? chipName.toLowerCase().replace(/[^a-z0-9]/g, '') : null;
+
+        // hardware can be a plain string (shown as-is) or an array of {name, url}
+        // when one firmware genuinely supports multiple distinct physical boards
+        // (e.g. webJPEG/webRAW auto-detect across the whole AMOLED lineup) - each
+        // gets its own linked badge rather than picking just one name to show.
+        const renderHardware = (hardware) => {
+            if (!hardware) return '';
+            const entries = Array.isArray(hardware) ? hardware : [{ name: hardware, url: null }];
+            return entries.map(h =>
+                h.url
+                    ? `<a href="${h.url}" target="_blank" rel="noopener noreferrer" class="hardware hardware-link">${h.name}</a>`
+                    : `<span class="hardware">${h.name}</span>`
+            ).join(' ');
+        };
+
         const renderFirmwareList = () => {
             const container = document.getElementById('firmwareList');
             container.innerHTML = '';
 
-            Object.entries(FIRMWARE_CONFIGS).forEach(([key, config]) => {
+            // Only known once connected (chipInfo is empty before that) - every
+            // firmware renders as normally selectable until then. See
+            // connectDevice()'s call to renderFirmwareList() after a successful sync.
+            const connectedMcu = normalizeChipToMcu(chipInfo.chipName);
+
+            const entries = Object.entries(FIRMWARE_CONFIGS).map(([key, config]) => ({
+                key,
+                config,
+                // No mcu on either side (unknown board, or a hand-added config.js
+                // entry with no manifest.json backing it) means "don't gate" rather
+                // than "assume incompatible" - only an actual mismatch grays it out.
+                compatible: !connectedMcu || !config.mcu || config.mcu === connectedMcu,
+            }));
+
+            // Compatible (or unknown-compatibility) firmwares first, incompatible
+            // ones grouped at the bottom - deprioritized, not hidden, so it's obvious
+            // an option exists but doesn't fit the connected device rather than just
+            // missing. Within the compatible group, `recommended: true` (at most one
+            // firmware in flasher-manifest.yml) sorts to the very top - incompatible
+            // never outranks compatible regardless of its own recommended flag, since
+            // it can't be selected either way.
+            entries.sort((a, b) => {
+                if (a.compatible !== b.compatible) return a.compatible ? -1 : 1;
+                if (!!a.config.recommended !== !!b.config.recommended) return a.config.recommended ? -1 : 1;
+                return 0;
+            });
+
+            entries.forEach(({ key, config, compatible }) => {
                 const card = document.createElement('div');
-                card.className = 'firmware-card';
+                card.className = 'firmware-card' + (compatible ? '' : ' incompatible');
                 card.innerHTML = `
-                    <h3>${config.name}</h3>
-                    <p>${config.description}</p>
-                    ${config.hardware ? `<span class="hardware">${config.hardware}</span>` : ''}
+                    <h3>${config.name}${config.recommended ? ' <span class="recommended-badge">Recommended</span>' : ''}</h3>
+                    ${compatible
+                        ? `<p>${config.description}</p>`
+                        : `<p class="requires-note">Not compatible with the connected ${chipInfo.chipName || 'device'}.</p>`}
+                    ${renderHardware(config.hardware)}
+                    <span class="build-date" data-build-date-for="${key}"></span>
                     ${config.sourceUrl ? `<a href="${config.sourceUrl}" target="_blank" rel="noopener noreferrer" class="source-link">View source ↗</a>` : ''}
                 `;
-                card.addEventListener('click', () => selectFirmware(key));
-                // Don't let clicking the source link also select the card underneath it.
-                card.querySelector('.source-link')?.addEventListener('click', (e) => e.stopPropagation());
+                if (compatible) {
+                    card.addEventListener('click', () => selectFirmware(key));
+                    // Don't let clicking a link inside the card also select the card underneath it.
+                    card.querySelector('.source-link')?.addEventListener('click', (e) => e.stopPropagation());
+                    card.querySelectorAll('.hardware-link').forEach(a => a.addEventListener('click', (e) => e.stopPropagation()));
+                }
                 container.appendChild(card);
+
+                loadBuildDate(key, config).then(date => {
+                    if (!date) return;
+                    const el = card.querySelector(`[data-build-date-for="${key}"]`);
+                    if (el) el.textContent = `Built ${date}`;
+                });
             });
         };
 
@@ -1253,27 +1529,73 @@
             
             config.variables.forEach((v, i) => {
                 const value = storage.get(v.firmware_name, v.default_value);
+                const labelClass = 'style="font-size: 0.8em; margin-bottom: 4px; color: #1a1a1a;"';
+
+                if (v.type === 'enum' && Array.isArray(v.options)) {
+                    const optionsHtml = v.options.map(opt => {
+                        const optValue = typeof opt === 'object' ? opt.value : opt;
+                        const optLabel = typeof opt === 'object' ? (opt.label || opt.value) : opt;
+                        return `<option value="${optValue}" ${optValue === value ? 'selected' : ''}>${optLabel}</option>`;
+                    }).join('');
+                    html += `
+                        <div class="variable-input-group">
+                            <label for="var_${i}" ${labelClass}>${v.readable_name}</label>
+                            <div class="variable-input-wrapper">
+                                <select id="var_${i}" data-firmware-name="${v.firmware_name}">${optionsHtml}</select>
+                                ${v.postfix ? `<span class="postfix">${v.postfix}</span>` : ''}
+                            </div>
+                        </div>`;
+                    return;
+                }
+
+                if (v.type === 'timezone') {
+                    // Value stored/selected here is the IANA zone name (e.g.
+                    // "America/New_York") - readable, and what the browser's own APIs
+                    // speak. replaceVariables() converts it to the POSIX TZ string
+                    // firmware actually needs via POSIX_TZ_DB at patch time, so a
+                    // localStorage override (an explicit prior user choice) always wins
+                    // over browser auto-detection, same precedence as every other
+                    // variable type - see storage.get() below.
+                    let browserZone = 'UTC';
+                    try { browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { /* ignore */ }
+                    const zones = (typeof Intl.supportedValuesOf === 'function')
+                        ? Intl.supportedValuesOf('timeZone')
+                        : Object.keys(POSIX_TZ_DB).sort();
+                    const tzValue = storage.get(v.firmware_name, null) || browserZone || v.default_value || 'UTC';
+                    const optionsHtml = zones.map(z => `<option value="${z}" ${z === tzValue ? 'selected' : ''}>${z}</option>`).join('');
+                    html += `
+                        <div class="variable-input-group">
+                            <label for="var_${i}" ${labelClass}>${v.readable_name}</label>
+                            <div class="variable-input-wrapper">
+                                <select id="var_${i}" data-firmware-name="${v.firmware_name}">${optionsHtml}</select>
+                                ${v.postfix ? `<span class="postfix">${v.postfix}</span>` : ''}
+                            </div>
+                        </div>`;
+                    return;
+                }
+
                 const isPassword = v.readable_name.toLowerCase().includes('password');
                 const inputType = (hidePassword && isPassword) ? 'password' : 'text';
-                const labelClass = (hidePassword && isPassword) ? 'style="font-size: 0.8em; margin-bottom: 4px; color: #1a1a1a; filter: blur(4px); user-select: none;"' : 'style="font-size: 0.8em; margin-bottom: 4px; color: #1a1a1a;"';
-                
+                const passwordLabelClass = (hidePassword && isPassword) ? 'style="font-size: 0.8em; margin-bottom: 4px; color: #1a1a1a; filter: blur(4px); user-select: none;"' : labelClass;
+
                 html += `
                     <div class="variable-input-group">
-                        <label for="var_${i}" ${labelClass}>${v.readable_name}</label>
+                        <label for="var_${i}" ${passwordLabelClass}>${v.readable_name}</label>
                         <div class="variable-input-wrapper">
-                            <input type="${inputType}" id="var_${i}" value="${value}" maxlength="${v.max_length || 100}" 
+                            <input type="${inputType}" id="var_${i}" value="${value}" maxlength="${v.max_length || 100}"
                                    data-firmware-name="${v.firmware_name}"
                                    ${hidePassword && isPassword ? 'style="filter: blur(4px);"' : ''}>
                             ${v.postfix ? `<span class="postfix">${v.postfix}</span>` : ''}
                         </div>
                     </div>`;
             });
-            
+
             container.innerHTML = html;
 
             config.variables.forEach((v, i) => {
                 const input = document.getElementById(`var_${i}`);
-                input.addEventListener('input', (e) => storage.set(v.firmware_name, e.target.value));
+                const eventName = ((v.type === 'enum' && Array.isArray(v.options)) || v.type === 'timezone') ? 'change' : 'input';
+                input.addEventListener(eventName, (e) => storage.set(v.firmware_name, e.target.value));
             });
         };
 
@@ -1286,43 +1608,97 @@
                 device = await navigator.serial.requestPort({
                     filters: CONFIG.FILTERS
                 });
-                
-                // Add disconnect listener
-                const handleDisconnect = (event) => {
+
+                // Known the moment the browser grants access, no connection needed -
+                // see WCH_VENDOR_ID's comment for why only this vendor ID gets the
+                // custom reset-and-retry path below.
+                const isConfirmedCH340 = device.getInfo().usbVendorId === WCH_VENDOR_ID;
+
+                // Add disconnect listener - tracked in deviceDisconnectHandler so
+                // disconnectDevice() can remove it; without that, every connect
+                // attempt (including retries) piled on another listener that never
+                // got cleaned up.
+                deviceDisconnectHandler = (event) => {
                     if (event.target === device) {
                         isDeviceConnected = false;
                         log('⚠️ Device disconnected', currentStep);
                         updateButtons();
                     }
                 };
-                navigator.serial.addEventListener('disconnect', handleDisconnect);
-                
-                transport = new Transport(device, true);
-                
-                esploader = new ESPLoader({
-                    transport: transport,
-                    baudrate: CONFIG.BAUD_RATE,
-                    terminal: {
-                        clean: () => {},
-                        writeLine: (data) => log(data, 1),
-                        write: (data) => log(data, 1)
-                    }
-                });
-                
+                navigator.serial.addEventListener('disconnect', deviceDisconnectHandler);
+
+                transport = new Transport(device, tracingEnabled);
+
                 log('📡 Connecting to device...', 1);
-                await esploader.main();
-                
+                if (isConfirmedCH340) {
+                    // Reset into bootloader and sync with a fresh pulse each retry,
+                    // rather than relying on esptool-js's own main()/default_reset -
+                    // see classicReset()'s comment for why plain esploader.main()
+                    // alone wasn't reliable on this board.
+                    await transport.connect(CONFIG.BAUD_RATE, {});
+                    let lastSyncError;
+                    for (let attempt = 1; attempt <= 3; attempt++) {
+                        try {
+                            log(`🔄 Entering bootloader mode... (attempt ${attempt}/3)`, 1);
+                            await classicReset(transport);
+                            await transport.disconnect();
+                            await sleep(200); // let the OS/browser fully release the port before reopening it
+                            transport = new Transport(device, tracingEnabled);
+                            esploader = new ESPLoader({
+                                transport: transport,
+                                baudrate: CONFIG.BAUD_RATE,
+                                terminal: {
+                                    clean: () => {},
+                                    writeLine: (data) => log(data, 1),
+                                    write: (data) => log(data, 1)
+                                }
+                            });
+                            await esploader.main('no_reset');
+                            lastSyncError = null;
+                            break;
+                        } catch (e) {
+                            lastSyncError = e;
+                            log(`Sync attempt ${attempt} failed: ${e.message}`, 1);
+                        }
+                    }
+                    if (lastSyncError) throw lastSyncError;
+                } else {
+                    // Untouched from before the CH340 fix existed - esptool-js's own
+                    // main()/default_reset already handles this correctly. Confirmed
+                    // the hard way that swapping in a custom pulse here too (even a
+                    // native-USB-tuned one, not classicReset() itself) made this
+                    // *worse* for the S3 AMOLED boards: minutes-long connects and an
+                    // unreliable post-flash reset. Don't reapply that without new
+                    // hardware evidence it actually helps.
+                    esploader = new ESPLoader({
+                        transport: transport,
+                        baudrate: CONFIG.BAUD_RATE,
+                        terminal: {
+                            clean: () => {},
+                            writeLine: (data) => log(data, 1),
+                            write: (data) => log(data, 1)
+                        }
+                    });
+                    await esploader.main();
+                }
+
                 const chipName = await esploader.chip.CHIP_NAME;
                 const features = await esploader.chip.CHIP_FEATURES;
                 const mac = await esploader.chip.MAC_ADDR;
                 
                 chipInfo = { chipName, features, mac };
                 isDeviceConnected = true;
-                
+
+                // Re-render now that the connected chip is known - applies
+                // compatibility gating (grays out firmwares that mcu can't run) that
+                // wasn't possible on the initial page-load render, before any device
+                // was connected.
+                renderFirmwareList();
+
                 log(`✅ Connected to ${chipName}`, 1);
                 log(`📍 MAC: ${mac}`, 1);
                 log(`🎯 Features: ${features}`, 1);
-                
+
                 // Update Step 2 chip info and show the box
                 document.getElementById('detectedChip').textContent = chipName;
                 document.getElementById('macAddress').textContent = mac;
@@ -1343,6 +1719,37 @@
                 
                 return false;
             }
+        };
+
+        // Actively releases the serial port and clears connection state - called when
+        // navigating back to step 1 (via prevBtn or clicking the step indicator).
+        // Without this, the port stayed open from the original connect, so clicking
+        // "Connect Device" again to retry just silently did nothing: requestPort()
+        // still shows the picker, but the subsequent transport.connect()/sync then
+        // contends with the still-open original connection instead of starting clean
+        // - confirmed as the actual cause of "retry connection does nothing".
+        const disconnectDevice = async () => {
+            if (deviceDisconnectHandler) {
+                navigator.serial.removeEventListener('disconnect', deviceDisconnectHandler);
+                deviceDisconnectHandler = null;
+            }
+            if (transport) {
+                try {
+                    await transport.disconnect();
+                } catch (e) {
+                    // Already closed/gone - fine, we're resetting state either way.
+                }
+            }
+            transport = null;
+            esploader = null;
+            device = null;
+            isDeviceConnected = false;
+            chipInfo = {};
+            document.getElementById('chipInfoBox').style.display = 'none';
+            // Clears the chip-compatibility gating applied in connectDevice() -
+            // otherwise the list would stay filtered for the previous connection
+            // even after this one is fully torn down.
+            renderFirmwareList();
         };
 
         // ==================== FLASHING ====================
@@ -1454,6 +1861,19 @@
                     log('✓ Continuing', 3);
                 }
 
+                // Reopen at the firmware's actual serial rate before monitoring - the
+                // port has been open at CONFIG.BAUD_RATE (the flash speed) this whole
+                // time, and reading a running firmware's Serial.begin() output at that
+                // rate instead of its own produces garbage bytes, not readable log
+                // lines. See config.js's MONITOR_BAUD_RATE comment.
+                try {
+                    await transport.disconnect();
+                    await sleep(200);
+                    await transport.connect(CONFIG.MONITOR_BAUD_RATE, {});
+                } catch (e) {
+                    log(`Could not reopen port for serial monitor: ${e.message}`, 3);
+                }
+
                 // Not awaited - runs an open-ended read loop until stopSerialMonitor()
                 // cancels it. Silently does nothing if the port went stale across a real
                 // USB re-enumeration (see startSerialMonitor()'s comment).
@@ -1509,26 +1929,49 @@
                 if (config.variables?.length) {
                     const summaryContent = document.getElementById('configSummaryContent');
                     let summaryHtml = '';
-                    
+                    let streamingUrl = null;
+
                     config.variables.forEach(variable => {
                         const input = document.querySelector(`[data-firmware-name="${variable.firmware_name}"]`);
                         if (input) {
                             const value = input.value;
-                            const displayValue = variable.postfix ? `${value}${variable.postfix}` : value;
+                            let displayValue = variable.postfix ? `${value}${variable.postfix}` : value;
+                            if (variable.type === 'enum' && Array.isArray(variable.options)) {
+                                const match = variable.options.find(opt => (typeof opt === 'object' ? opt.value : opt) === value);
+                                if (match) displayValue = typeof match === 'object' ? (match.label || match.value) : match;
+                            }
                             const isPassword = variable.readable_name.toLowerCase().includes('password');
+                            const isMdns = variable.readable_name.toLowerCase().includes('mdns');
                             const valueStyle = (hidePassword && isPassword) ? 'style="filter: blur(4px); user-select: none;"' : '';
                             const labelStyle = (hidePassword && isPassword) ? 'style="filter: blur(4px); user-select: none;"' : '';
-                            
+
+                            // Same host the device itself actually serves the
+                            // streaming page from - the mDNS hostname, not a
+                            // random guess at a URL.
+                            if (isMdns && value) {
+                                streamingUrl = `http://${displayValue}`;
+                            }
+                            const valueHtml = (isMdns && value)
+                                ? `<a href="http://${displayValue}" target="_blank" rel="noopener noreferrer">${displayValue}</a>`
+                                : displayValue;
+
                             summaryHtml += `
                                 <div class="chip-info-row">
                                     <span class="chip-info-label" ${labelStyle}>${variable.readable_name}:</span>
-                                    <span class="chip-info-value" ${valueStyle}>${displayValue}</span>
+                                    <span class="chip-info-value" ${valueStyle}>${valueHtml}</span>
                                 </div>`;
                         }
                     });
-                    
+
                     summaryContent.innerHTML = summaryHtml;
                     document.getElementById('configSummary').style.display = 'block';
+
+                    if (streamingUrl) {
+                        const link = document.getElementById('streamingLink');
+                        link.href = streamingUrl;
+                        link.textContent = `${streamingUrl} ↗`;
+                        document.getElementById('streamingLinkBlock').style.display = 'block';
+                    }
                 }
                 
                 // Move to final step
@@ -1567,9 +2010,11 @@
                 const nextBtn = document.getElementById('nextBtn');
                 nextBtn.disabled = true;
                 nextBtn.textContent = 'Connecting...';
-                
+                nextBtn.classList.add('btn-spinner-active');
+
                 const success = await connectDevice();
-                
+
+                nextBtn.classList.remove('btn-spinner-active');
                 if (success) {
                     currentStep = 2;
                     updateStepIndicators();
@@ -1592,32 +2037,45 @@
             }
         });
 
-        document.getElementById('prevBtn').addEventListener('click', () => {
-            if (currentStep > 1) {
-                currentStep--;
-                
-                // If going back to step 1, reset the next button to allow reconnection
-                if (currentStep === 1) {
-                    const nextBtn = document.getElementById('nextBtn');
-                    if (!isDeviceConnected) {
-                        nextBtn.textContent = 'Connect Device';
-                        nextBtn.disabled = false;
-                    } else {
-                        nextBtn.textContent = 'Reconnect Device';
-                        nextBtn.disabled = false;
-                    }
-                }
-                
-                // If going back to step 2, ensure firmware selection is maintained
-                if (currentStep === 2 && selectedFirmware) {
-                    const nextBtn = document.getElementById('nextBtn');
-                    nextBtn.textContent = 'Flash Firmware';
-                    nextBtn.disabled = false;
-                }
-                
-                updateStepIndicators();
-                updateButtons();
+        // Shared by prevBtn and clicking a step indicator directly - only ever moves
+        // backward to an already-completed step, never skips ahead (there's nothing
+        // to validate/re-run that would make skipping ahead safe). Landing back on
+        // step 1 actively disconnects (see disconnectDevice()'s comment for why this
+        // matters for "Connect Device" actually working again on retry) rather than
+        // just resetting the button label and leaving the old connection dangling.
+        const goToStep = async (targetStep) => {
+            if (targetStep >= currentStep || targetStep < 1) return;
+
+            if (targetStep === 1) {
+                await disconnectDevice();
             }
+            currentStep = targetStep;
+
+            const nextBtn = document.getElementById('nextBtn');
+            if (currentStep === 1) {
+                nextBtn.textContent = 'Connect Device';
+                nextBtn.disabled = false;
+            } else if (currentStep === 2 && selectedFirmware) {
+                nextBtn.textContent = 'Flash Firmware';
+                nextBtn.disabled = false;
+            }
+
+            updateStepIndicators();
+            updateButtons();
+        };
+
+        document.getElementById('prevBtn').addEventListener('click', () => {
+            goToStep(currentStep - 1);
+        });
+
+        // Step indicators (the numbered "1 Connect / 2 Configure / ..." row at top)
+        // are clickable shortcuts to the same backward navigation prevBtn does -
+        // goToStep() already refuses to go forward, so this can't be used to skip
+        // ahead of an incomplete step.
+        document.querySelectorAll('.step-indicator').forEach(indicator => {
+            indicator.addEventListener('click', () => {
+                goToStep(parseInt(indicator.dataset.step, 10));
+            });
         });
 
         // ==================== INITIALIZATION ====================
@@ -1628,15 +2086,24 @@
         let siteConfig = {};
 
         // Overrides this generic tool's own branding with a consuming repo's own -
-        // e.g. "Powered Up BLE Library Flasher" instead of "ESP32-S3 Flash Wizard" -
-        // from manifest.json's site.title/site.subtitle/site.bootModeVideo (
-        // flasher-manifest.yml's top-level `site:` key). Anything not provided keeps
-        // this repo's own default. bootModeVideo is site-wide only (not
-        // per-firmware): step 1 (where it's shown) runs before firmware selection in
-        // step 2, so there's no firmware-specific choice to apply yet.
+        // e.g. "Powered Up BLE Library Flasher" instead of "ESP32 Flash Wizard" -
+        // from manifest.json's site.title/site.subtitle/site.bootModeVideo/
+        // site.chipName/site.filters (flasher-manifest.yml's top-level `site:` key).
+        // Anything not provided keeps this repo's own default. bootModeVideo is
+        // site-wide only (not per-firmware): step 1 (where it's shown) runs before
+        // firmware selection in step 2, so there's no firmware-specific choice to
+        // apply yet. chipName/filters mirror config.js's CHIP_NAME/FILTERS, letting a
+        // consuming repo target its own chip and USB vendor IDs without hand-editing
+        // config.js.
         const applySiteCustomization = (site) => {
             if (!site) return;
             siteConfig = site;
+            if (site.chipName) {
+                CONFIG.CHIP_NAME = site.chipName;
+            }
+            if (site.filters) {
+                CONFIG.FILTERS = site.filters;
+            }
             if (site.title) {
                 document.title = site.title;
                 const h1 = document.querySelector('.wizard-header h1');

@@ -25,6 +25,7 @@
           "offset": 65536
         }
       ],
+      "mcu": "esp32s3",
       "hardware": "esp32-s3-devkitc-1",
       "sourceUrl": "https://github.com/lemio/esp32_PoweredUp/tree/master/examples/analog_throttle"
     },
@@ -49,8 +50,34 @@
           "offset": 65536
         }
       ],
+      "mcu": "esp32s3",
       "hardware": "esp32-s3-devkitc-1",
       "sourceUrl": "https://github.com/lemio/esp32_PoweredUp/tree/master/examples/button_motor"
+    },
+    "multi_sensor": {
+      "name": "multi_sensor.ino",
+      "description": "Two sensors on one WeDo 2.0 hub at once - a tilt sensor on each port plus a distance sensor wherever it turns up, each printing to Serial on its own.",
+      "files": [
+        {
+          "path": "firmware/multi_sensor/bootloader.bin",
+          "offset": 0
+        },
+        {
+          "path": "firmware/multi_sensor/partitions.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/multi_sensor/boot_app0.bin",
+          "offset": 57344
+        },
+        {
+          "path": "firmware/multi_sensor/firmware.bin",
+          "offset": 65536
+        }
+      ],
+      "mcu": "esp32s3",
+      "hardware": "esp32-s3-devkitc-1",
+      "sourceUrl": "https://github.com/lemio/esp32_PoweredUp/tree/master/examples/multi_sensor"
     },
     "sensor_motor": {
       "name": "sensor_motor.ino",
@@ -73,6 +100,7 @@
           "offset": 65536
         }
       ],
+      "mcu": "esp32s3",
       "hardware": "esp32-s3-devkitc-1",
       "sourceUrl": "https://github.com/lemio/esp32_PoweredUp/tree/master/examples/sensor_motor"
     },
@@ -97,6 +125,7 @@
           "offset": 65536
         }
       ],
+      "mcu": "esp32s3",
       "hardware": "esp32-s3-devkitc-1",
       "sourceUrl": "https://github.com/lemio/esp32_PoweredUp/tree/master/examples/train_hub"
     },
@@ -121,6 +150,7 @@
           "offset": 65536
         }
       ],
+      "mcu": "esp32s3",
       "hardware": "esp32-s3-devkitc-1",
       "sourceUrl": "https://github.com/lemio/esp32_PoweredUp/tree/master/examples/train_remote"
     },
@@ -145,6 +175,7 @@
           "offset": 65536
         }
       ],
+      "mcu": "esp32s3",
       "hardware": "esp32-s3-devkitc-1",
       "variables": [
         {

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32-S3 Web Flasher</title>
+    <title>ESP32 Web Flasher</title>
     <style>
         * {
             margin: 0;
@@ -383,7 +383,8 @@
             gap: 8px;
         }
 
-        .variable-input-wrapper input {
+        .variable-input-wrapper input,
+        .variable-input-wrapper select {
             flex: 1;
             padding: 10px 12px;
             border: 1px solid #e5e7eb;
@@ -393,7 +394,8 @@
             background: white;
         }
 
-        .variable-input-wrapper input:focus {
+        .variable-input-wrapper input:focus,
+        .variable-input-wrapper select:focus {
             outline: none;
             border-color: #3b82f6;
             box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
@@ -455,8 +457,8 @@
 </head>
 <body>
     <div class="container">
-        <h1>ESP32-S3 Web Flasher</h1>
-        <p class="subtitle">Flash your ESP32-S3 device directly from your browser</p>
+        <h1>ESP32 Web Flasher</h1>
+        <p class="subtitle">Flash your ESP32 device directly from your browser</p>
 
         <div class="status" id="status"></div>
 
@@ -474,7 +476,7 @@
 
         <div class="section">
             <div class="section-title">2. Connect Device</div>
-            <button id="connectBtn">Connect to ESP32-S3</button>
+            <button id="connectBtn">Connect to ESP32</button>
         </div>
 
         <div class="section">
@@ -510,6 +512,7 @@
     <script type="module">
         import { Transport, ESPLoader } from 'https://unpkg.com/esptool-js@0.5.7/bundle.js';
         import { CONFIG, FIRMWARE_CONFIGS } from './config.js';
+        import { POSIX_TZ_DB, POSIX_TZ_ALIASES } from './posix_tz_db.js';
 
         // ==================== STATE ====================
         
@@ -518,6 +521,14 @@
         let transport = null;
         let connected = false;
         let serialMonitorActive = false;
+        // esptool-js's Transport tracing (its own `console.log`, not this page's log
+        // panel) - a full hex dump of every single byte read/written. Genuinely useful
+        // when diagnosing a stuck sync, but hundreds of these calls during a normal
+        // connect (sync + chip detection + stub upload) adds real overhead - Chrome's
+        // DevTools console formatting cost is non-trivial per call, especially with
+        // DevTools actually open watching them - so this defaults off and is opt-in via
+        // ?trace=1, not force-enabled unconditionally like it used to be.
+        const tracingEnabled = new URLSearchParams(window.location.search).get('trace') === '1';
 
         // ==================== DOM ELEMENTS ====================
         
@@ -662,7 +673,15 @@
                 const input = document.querySelector(`[data-firmware-name="${variable.firmware_name}"]`);
                 if (!input) continue;
 
-                const value = input.value;
+                // For type: "timezone", input.value is the IANA zone name shown in the
+                // dropdown (e.g. "America/New_York") - firmware needs the POSIX TZ
+                // string instead (e.g. "EST5EDT,M3.2.0,M11.1.0"), so look it up here,
+                // right before patching, rather than storing the POSIX string as the
+                // select's own value (which would make same-rule zones like
+                // America/New_York and America/Detroit indistinguishable in the UI).
+                const value = variable.type === 'timezone'
+                    ? (POSIX_TZ_DB[input.value] || POSIX_TZ_DB[POSIX_TZ_ALIASES[input.value]] || 'UTC0')
+                    : input.value;
                 const searchString = variable.firmware_name;
                 const maxLen = variable.max_length || 100;
                 
@@ -732,25 +751,72 @@
             
             config.variables.forEach((v, i) => {
                 const value = storage.get(v.firmware_name, v.default_value);
+
+                if (v.type === 'enum' && Array.isArray(v.options)) {
+                    const optionsHtml = v.options.map(opt => {
+                        const optValue = typeof opt === 'object' ? opt.value : opt;
+                        const optLabel = typeof opt === 'object' ? (opt.label || opt.value) : opt;
+                        return `<option value="${optValue}" ${optValue === value ? 'selected' : ''}>${optLabel}</option>`;
+                    }).join('');
+                    html += `
+                        <div class="variable-input-group">
+                            <label for="var_${i}">${v.readable_name}:</label>
+                            <div class="variable-input-wrapper">
+                                ${v.prefix ? `<span class="prefix">${v.prefix}</span>` : ''}
+                                <select id="var_${i}" data-firmware-name="${v.firmware_name}">${optionsHtml}</select>
+                                ${v.postfix ? `<span class="postfix">${v.postfix}</span>` : ''}
+                            </div>
+                        </div>`;
+                    return;
+                }
+
+                if (v.type === 'timezone') {
+                    // Value stored/selected here is the IANA zone name (e.g.
+                    // "America/New_York") - readable, and what the browser's own APIs
+                    // speak. replaceVariables() converts it to the POSIX TZ string
+                    // firmware actually needs via POSIX_TZ_DB at patch time, so a
+                    // localStorage override (an explicit prior user choice) always wins
+                    // over browser auto-detection, same precedence as every other
+                    // variable type - see storage.get() below.
+                    let browserZone = 'UTC';
+                    try { browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { /* ignore */ }
+                    const zones = (typeof Intl.supportedValuesOf === 'function')
+                        ? Intl.supportedValuesOf('timeZone')
+                        : Object.keys(POSIX_TZ_DB).sort();
+                    const tzValue = storage.get(v.firmware_name, null) || browserZone || v.default_value || 'UTC';
+                    const optionsHtml = zones.map(z => `<option value="${z}" ${z === tzValue ? 'selected' : ''}>${z}</option>`).join('');
+                    html += `
+                        <div class="variable-input-group">
+                            <label for="var_${i}">${v.readable_name}:</label>
+                            <div class="variable-input-wrapper">
+                                ${v.prefix ? `<span class="prefix">${v.prefix}</span>` : ''}
+                                <select id="var_${i}" data-firmware-name="${v.firmware_name}">${optionsHtml}</select>
+                                ${v.postfix ? `<span class="postfix">${v.postfix}</span>` : ''}
+                            </div>
+                        </div>`;
+                    return;
+                }
+
                 html += `
                     <div class="variable-input-group">
                         <label for="var_${i}">${v.readable_name}:</label>
                         <div class="variable-input-wrapper">
                             ${v.prefix ? `<span class="prefix">${v.prefix}</span>` : ''}
-                            <input type="text" id="var_${i}" value="${value}" maxlength="${v.max_length || 100}" 
+                            <input type="text" id="var_${i}" value="${value}" maxlength="${v.max_length || 100}"
                                    data-firmware-name="${v.firmware_name}">
                             ${v.postfix ? `<span class="postfix">${v.postfix}</span>` : ''}
                         </div>
                     </div>`;
             });
-            
+
             html += '</div>';
             elements.variablesContainer.innerHTML = html;
 
             // Attach event listeners
             config.variables.forEach((v, i) => {
                 const input = document.getElementById(`var_${i}`);
-                input.addEventListener('input', (e) => storage.set(v.firmware_name, e.target.value));
+                const eventName = ((v.type === 'enum' && Array.isArray(v.options)) || v.type === 'timezone') ? 'change' : 'input';
+                input.addEventListener(eventName, (e) => storage.set(v.firmware_name, e.target.value));
             });
 
             document.getElementById('resetVarsBtn')?.addEventListener('click', () => {
@@ -815,11 +881,12 @@
 
         // Reads raw (non-SLIP-framed) bytes straight from the same port used for
         // flashing - transport.rawRead() bypasses esptool-js's SLIP packet parsing,
-        // which is only meant for talking to the ROM bootloader/stub. This assumes the
-        // firmware's Serial.begin() matches CONFIG.BAUD_RATE (115200, the standard
-        // Arduino default) - the port was already opened at that rate for flashing and
-        // is never changed since romBaudrate === baudrate in this tool's config, so no
-        // reconnect is needed here.
+        // which is only meant for talking to the ROM bootloader/stub. The caller
+        // (the flash button handler) reopens the port at CONFIG.MONITOR_BAUD_RATE
+        // right before calling this - reading at CONFIG.BAUD_RATE (the flash speed)
+        // instead would just show garbage, since the firmware's own Serial.begin()
+        // call runs at a fixed, different rate esptool has no way to know or
+        // negotiate.
         const startSerialMonitor = async () => {
             if (!transport || serialMonitorActive) return;
             serialMonitorActive = true;
@@ -908,7 +975,7 @@
                 await sleep(CONFIG.DISCONNECT_WAIT_MS);
             }
             connected = false;
-            elements.connectBtn.textContent = 'Connect to ESP32-S3';
+            elements.connectBtn.textContent = `Connect to ${CONFIG.CHIP_NAME}`;
             elements.connectBtn.classList.remove('connected');
             elements.flashBtn.disabled = true;
             esploader = null;
@@ -959,7 +1026,7 @@
         // a stub was already running from the first flash's sync. Fresh objects avoid
         // that whole class of problem, not just the port-already-open issue.
         const syncWithDevice = async (targetDevice, mode = 'default_reset') => {
-            transport = new Transport(targetDevice, true);
+            transport = new Transport(targetDevice, tracingEnabled);
             esploader = new ESPLoader({
                 transport: transport,
                 baudrate: CONFIG.BAUD_RATE,
@@ -983,7 +1050,7 @@
             // click even if the device was mid-way through running its own firmware.
             // Only Flash Device (below) actually needs bootloader mode, so that's the
             // only place that's still true.
-            transport = new Transport(device, true);
+            transport = new Transport(device, tracingEnabled);
             await transport.connect(CONFIG.BAUD_RATE, {});
 
             log('Device connected - click Flash Device to begin', 'success');
@@ -1005,7 +1072,7 @@
                 
                 // Reset UI state
                 connected = false;
-                elements.connectBtn.textContent = 'Connect to ESP32-S3';
+                elements.connectBtn.textContent = `Connect to ${CONFIG.CHIP_NAME}`;
                 elements.connectBtn.classList.remove('connected');
                 elements.flashBtn.disabled = true;
                 elements.progressContainer.style.display = 'none';
@@ -1047,10 +1114,10 @@
                     // Show detailed instructions
                     log('', 'info');
                     log('How to enter boot mode:', 'warning');
-                    log('1. Hold the BOOT button on your ESP32-S3', 'info');
+                    log(`1. Hold the BOOT button on your ${CONFIG.CHIP_NAME}`, 'info');
                     log('2. While holding BOOT, press the RESET button (or plug in USB)', 'info');
                     log('3. Release both buttons', 'info');
-                    log('4. Click "Connect to ESP32-S3" again', 'info');
+                    log(`4. Click "Connect to ${CONFIG.CHIP_NAME}" again`, 'info');
                     log('', 'info');
                 } else {
                     log(`Connection error: ${error.message}`, 'error');
@@ -1099,9 +1166,12 @@
 
                 const flashConfig = { name: config.name, chip: CONFIG.CHIP_NAME, files: downloaded };
                 const esptoolArgs = downloaded.map(f => `0x${f.offset.toString(16)} ${f.path}`).join(' ');
+                // esptool.py's --chip flag is the chip name lowercased with separators
+                // stripped, e.g. "ESP32-S3" -> "esp32s3", "ESP32-C3" -> "esp32c3".
+                const esptoolChipFlag = CONFIG.CHIP_NAME.toLowerCase().replace(/[^a-z0-9]/g, '');
                 const configJs = `// Flash configuration for ${config.name}\n` +
                     `// Write each file to its offset, e.g.:\n` +
-                    `// esptool.py --chip esp32s3 write_flash ${esptoolArgs}\n` +
+                    `// esptool.py --chip ${esptoolChipFlag} write_flash ${esptoolArgs}\n` +
                     `const FLASH_CONFIG = ${JSON.stringify(flashConfig, null, 4)};\n`;
                 downloadBlob(configJs, `${key}-flash-config.js`, 'text/javascript');
 
@@ -1252,6 +1322,16 @@
                 log('Flash operation complete!', 'success');
                 showStatus('Flash successful! Device is now booting.', 'success');
 
+                // Reopen at the firmware's actual serial rate before monitoring - see
+                // startSerialMonitor()'s comment and config.js's MONITOR_BAUD_RATE.
+                try {
+                    await transport.disconnect();
+                    await sleep(200);
+                    await transport.connect(CONFIG.MONITOR_BAUD_RATE, {});
+                } catch (e) {
+                    log(`Could not reopen port for serial monitor: ${e.message}`, 'warning');
+                }
+
                 // Not awaited - this runs an open-ended read loop until stopSerialMonitor()
                 // cancels it, so awaiting here would block forever instead of finishing this function.
                 startSerialMonitor();
@@ -1274,7 +1354,7 @@
                     log('⚠️  IMPORTANT: Enter boot mode BEFORE clicking Flash!', 'warning');
                     log('', 'info');
                     log('How to enter boot mode:', 'warning');
-                    log('1. Hold the BOOT button on your ESP32-S3', 'info');
+                    log(`1. Hold the BOOT button on your ${CONFIG.CHIP_NAME}`, 'info');
                     log('2. While holding BOOT, press the RESET button (or unplug/replug USB)', 'info');
                     log('3. Release both buttons', 'info');
                     log('4. The device is now in boot mode!', 'info');
@@ -1301,12 +1381,35 @@
 
         // ==================== INITIALIZATION ====================
 
+        // Re-derives the chip-name-based defaults (title/h1/subtitle/connect button)
+        // from CONFIG.CHIP_NAME - called once on load and again if manifest.json's
+        // site.chipName overrides it, so every one of those elements stays in sync
+        // with whichever chip this deployment is actually targeting.
+        const renderChipDefaults = () => {
+            document.title = `${CONFIG.CHIP_NAME} Web Flasher`;
+            const h1 = document.querySelector('h1');
+            if (h1) h1.textContent = `${CONFIG.CHIP_NAME} Web Flasher`;
+            const subtitleEl = document.querySelector('.subtitle');
+            if (subtitleEl) subtitleEl.textContent = `Flash your ${CONFIG.CHIP_NAME} device directly from your browser`;
+            if (!connected) elements.connectBtn.textContent = `Connect to ${CONFIG.CHIP_NAME}`;
+        };
+
         // Overrides this generic tool's own branding with a consuming repo's own -
-        // e.g. "Powered Up BLE Library Flasher" instead of "ESP32-S3 Web Flasher" -
-        // from manifest.json's site.title/site.subtitle (flasher-manifest.yml's
-        // top-level `site:` key). Anything not provided keeps this repo's own default.
+        // e.g. "Powered Up BLE Library Flasher" instead of "ESP32 Web Flasher" - from
+        // manifest.json's site.title/site.subtitle/site.chipName/site.filters
+        // (flasher-manifest.yml's top-level `site:` key). Anything not provided keeps
+        // this repo's own default. chipName and filters mirror config.js's CHIP_NAME/
+        // FILTERS, letting a consuming repo target its own chip and USB vendor IDs
+        // without hand-editing config.js.
         const applySiteCustomization = (site) => {
             if (!site) return;
+            if (site.chipName) {
+                CONFIG.CHIP_NAME = site.chipName;
+                renderChipDefaults();
+            }
+            if (site.filters) {
+                CONFIG.FILTERS = site.filters;
+            }
             if (site.title) {
                 document.title = site.title;
                 const h1 = document.querySelector('h1');
@@ -1343,6 +1446,8 @@
         };
 
         window.addEventListener('load', async () => {
+            renderChipDefaults();
+
             if (!('serial' in navigator)) {
                 showStatus('Web Serial API not supported. Use Chrome, Edge, or Opera.', 'error');
                 elements.connectBtn.disabled = true;
