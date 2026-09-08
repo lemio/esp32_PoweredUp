@@ -489,13 +489,14 @@ int PoweredUp::_addWedoSubscription(int8_t port, uint8_t deviceId, RawInputHandl
   return freeSlot;
 }
 
-void PoweredUp::_configureWedoPort(uint8_t normalizedPort, const WedoSubscription& sub) {
+void PoweredUp::_configureWedoPort(uint8_t normalizedPort, WedoSubscription& sub) {
   // Safe to call while a notification callback is running (which is where _bindWedoPort()
   // reaches this from): writePortDefinition() goes through writeCommand()/bleWriteCommand(),
   // which queues the write and lets bleHandleConnections() send it from the main loop.
   writePortDefinition(normalizedPort + 1, sub.deviceId, 0, _wedoRangeFormatFor(sub.deviceId));
   _wedoDevices[normalizedPort] = sub.deviceId;
   _wedoHandlers[normalizedPort] = sub.callback;
+  sub.boundPort = (int8_t)normalizedPort;
 }
 
 void PoweredUp::_bindWedoPort(uint8_t normalizedPort) {
@@ -509,12 +510,15 @@ void PoweredUp::_bindWedoPort(uint8_t normalizedPort) {
 
   int best = -1;
   for (uint8_t i = 0; i < MAX_WEDO_SUBSCRIPTIONS; i++) {
-    const WedoSubscription& s = _wedoSubscriptions[i];
+    WedoSubscription& s = _wedoSubscriptions[i];
     if (!s.inUse || s.deviceId != deviceId) {
       continue;
     }
     if (s.port >= 0 && s.port != (int8_t)normalizedPort) {
       continue; // named a different port - it keeps waiting for that one
+    }
+    if (s.port < 0 && s.boundPort >= 0 && s.boundPort != (int8_t)normalizedPort) {
+      continue; // "wherever it turns up" already turned up somewhere, and is still there
     }
     // A subscription that named this port beats one that takes any port.
     if (best < 0 || (_wedoSubscriptions[best].port < 0 && s.port >= 0)) {
@@ -644,6 +648,7 @@ void PoweredUp::monitorInput(int port, RawInputHandler callback, uint8_t mode) {
 
   _subscriptions[idx].mode = mode;
   _subscriptions[idx].handler = callback;
+  _subscriptions[idx].fromMonitor = false; // named its port outright - a detach won't drop it
   _sendPortInputFormatSetup(rawPort, mode);
 }
 
@@ -669,7 +674,7 @@ void PoweredUp::_recordAttached(uint8_t port, uint16_t ioTypeId) {
     _attached[idx].ioTypeId = ioTypeId;
   }
 
-  _resolvePendingMonitors(port, ioTypeId);
+  _bindLwp3Port(port, ioTypeId);
 }
 
 int PoweredUp::_findAttachedPort(const uint16_t* candidateTypes, uint8_t candidateCount) {
@@ -688,6 +693,112 @@ int PoweredUp::_findAttachedPort(const uint16_t* candidateTypes, uint8_t candida
 
 // --- onDistanceChanged() / onTiltChanged() / remoteButton() (simple, with fallback search) ---
 
+bool PoweredUp::_monitorMatches(const MonitorRequest& monitor, uint16_t ioTypeId) {
+  for (uint8_t c = 0; c < monitor.candidateCount; c++) {
+    if (monitor.candidateTypes[c] == ioTypeId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Records what the sketch asked for. Calling onTiltChanged() twice for the same port
+// replaces the callback rather than filling up the table.
+int PoweredUp::_addMonitorRequest(int8_t port, const uint16_t* candidateTypes, uint8_t candidateCount,
+                                   uint8_t mode, RawInputHandler callback, const char* label) {
+  uint8_t count = candidateCount > MAX_CANDIDATE_TYPES ? MAX_CANDIDATE_TYPES : candidateCount;
+
+  int freeSlot = -1;
+  for (uint8_t i = 0; i < MAX_MONITOR_REQUESTS; i++) {
+    if (!_monitors[i].inUse) {
+      if (freeSlot < 0) {
+        freeSlot = i;
+      }
+      continue;
+    }
+    if (_monitors[i].port == port && _monitors[i].mode == mode && count > 0 &&
+        _monitors[i].candidateCount == count && _monitorMatches(_monitors[i], candidateTypes[0])) {
+      _monitors[i].callback = callback;
+      _monitors[i].label = label;
+      return i;
+    }
+  }
+  if (freeSlot < 0) {
+    printf("%s: no room for another subscription (max %d)\n", label, MAX_MONITOR_REQUESTS);
+    return -1;
+  }
+
+  _monitors[freeSlot].inUse = true;
+  _monitors[freeSlot].port = port;
+  _monitors[freeSlot].boundPort = -1;
+  _monitors[freeSlot].mode = mode;
+  _monitors[freeSlot].callback = callback;
+  _monitors[freeSlot].candidateCount = count;
+  for (uint8_t c = 0; c < count; c++) {
+    _monitors[freeSlot].candidateTypes[c] = candidateTypes[c];
+  }
+  _monitors[freeSlot].label = label;
+  return freeSlot;
+}
+
+// Picks the subscription that should own this port now that the hub has said what's
+// plugged into it, and subscribes to the port's input format for it. A subscription that
+// named this port beats one that takes any port, and a port-less one that's already
+// driving another port is left where it is.
+void PoweredUp::_bindLwp3Port(uint8_t port, uint16_t ioTypeId) {
+  int best = -1;
+  for (uint8_t i = 0; i < MAX_MONITOR_REQUESTS; i++) {
+    const MonitorRequest& m = _monitors[i];
+    if (!m.inUse || !_monitorMatches(m, ioTypeId)) {
+      continue;
+    }
+    if (m.port >= 0 && m.port != (int8_t)port) {
+      continue; // named a different port - it keeps waiting for that one
+    }
+    if (m.port < 0 && m.boundPort >= 0 && m.boundPort != (int8_t)port) {
+      continue; // "wherever it turns up" already turned up somewhere, and is still there
+    }
+    if (best < 0 || (_monitors[best].port < 0 && m.port >= 0)) {
+      best = i;
+    }
+  }
+  if (best < 0) {
+    return; // nothing subscribed to this kind of device
+  }
+
+  int idx = _allocSubscription(port);
+  if (idx < 0) {
+    printf("%s: no room for another port subscription (max %d)\n", _monitors[best].label,
+           MAX_SUBSCRIPTIONS);
+    return;
+  }
+
+  printf("%s: listening on port %d\n", _monitors[best].label, port);
+  _subscriptions[idx].mode = _monitors[best].mode;
+  _subscriptions[idx].handler = _monitors[best].callback;
+  _subscriptions[idx].fromMonitor = true;
+  // The subscribe write itself is deferred to handleConnection(): this is reached from
+  // inside the notification callback (attach event -> _recordAttached() -> here), and
+  // writing to the BLE characteristic from there exhausts the NimBLE stack's buffer pool.
+  _subscriptions[idx].reArmPending = true;
+  _monitors[best].boundPort = (int8_t)port;
+}
+
+// A device left this port, so whatever was listening to it lets go. Subscriptions made
+// by monitorInput() stay put - that escape hatch named its port explicitly.
+void PoweredUp::_releaseLwp3Port(uint8_t port) {
+  for (uint8_t i = 0; i < MAX_MONITOR_REQUESTS; i++) {
+    if (_monitors[i].inUse && _monitors[i].boundPort == (int8_t)port) {
+      _monitors[i].boundPort = -1;
+    }
+  }
+
+  int idx = _findSubscription(port);
+  if (idx >= 0 && _subscriptions[idx].fromMonitor) {
+    _subscriptions[idx] = PortSubscription();
+  }
+}
+
 void PoweredUp::_monitorWithFallback(int portArg, bool portGiven, const uint16_t* candidateTypes,
                                       uint8_t candidateCount, const char* label, uint8_t mode,
                                       RawInputHandler callback) {
@@ -696,102 +807,34 @@ void PoweredUp::_monitorWithFallback(int portArg, bool portGiven, const uint16_t
     return;
   }
 
-  uint8_t requestedPort = portGiven ? _normalizePort(portArg) : 0;
+  // A named port is taken literally. This used to fall back to whichever port the device
+  // was actually on, which quietly handed this callback a port another subscription was
+  // already using - and left the named port with nothing listening to it.
+  int8_t wanted = portGiven ? (int8_t)_normalizePort(portArg) : -1;
 
-  // Is there already a matching device attached somewhere?
-  int matchPort = _findAttachedPort(candidateTypes, candidateCount);
-  if (matchPort >= 0) {
-    if (portGiven && (uint8_t)matchPort != requestedPort) {
-      printf("%s: expected device wasn't found on the given port - found it on port %d instead, using that\n",
-             label, matchPort);
-    }
-    int idx = _allocSubscription((uint8_t)matchPort);
-    if (idx >= 0) {
-      _subscriptions[idx].mode = mode;
-      _subscriptions[idx].handler = callback;
-      _sendPortInputFormatSetup((uint8_t)matchPort, mode);
-    }
+  int idx = _addMonitorRequest(wanted, candidateTypes, candidateCount, mode, callback, label);
+  if (idx < 0) {
     return;
   }
 
-  // No confirmed match anywhere yet. If the given port has *something* attached (just
-  // not confirmed as the right kind), use it anyway as a best effort.
-  bool requestedPortKnown = false;
+  // Bind it now if the hub has already reported a matching device where we may look.
   for (uint8_t i = 0; i < MAX_ATTACHED_DEVICES; i++) {
-    if (_attached[i].inUse && _attached[i].port == requestedPort) {
-      requestedPortKnown = true;
-      break;
-    }
-  }
-
-  if (portGiven && requestedPortKnown) {
-    printf("%s: couldn't confirm the device on the given port is the right kind - using it anyway\n", label);
-    int idx = _allocSubscription(requestedPort);
-    if (idx >= 0) {
-      _subscriptions[idx].mode = mode;
-      _subscriptions[idx].handler = callback;
-      _sendPortInputFormatSetup(requestedPort, mode);
-    }
-    return;
-  }
-
-  // Nothing to go on yet - wait for a matching device to attach.
-  for (uint8_t i = 0; i < MAX_PENDING_MONITORS; i++) {
-    if (_pending[i].waiting) {
+    if (!_attached[i].inUse) {
       continue;
     }
-    _pending[i].waiting = true;
-    _pending[i].portGiven = portGiven;
-    _pending[i].requestedPort = requestedPort;
-    _pending[i].mode = mode;
-    _pending[i].callback = callback;
-    _pending[i].candidateCount = candidateCount > MAX_CANDIDATE_TYPES ? MAX_CANDIDATE_TYPES : candidateCount;
-    for (uint8_t c = 0; c < _pending[i].candidateCount; c++) {
-      _pending[i].candidateTypes[c] = candidateTypes[c];
-    }
-    _pending[i].label = label;
-    printf("%s: no matching device found yet - will start listening automatically once one attaches\n", label);
-    return;
-  }
-  printf("%s: too many pending monitor requests (max %d)\n", label, MAX_PENDING_MONITORS);
-}
-
-void PoweredUp::_resolvePendingMonitors(uint8_t port, uint16_t ioTypeId) {
-  for (uint8_t i = 0; i < MAX_PENDING_MONITORS; i++) {
-    if (!_pending[i].waiting) {
+    if (wanted >= 0 && _attached[i].port != (uint8_t)wanted) {
       continue;
     }
-
-    bool matches = false;
-    for (uint8_t c = 0; c < _pending[i].candidateCount; c++) {
-      if (_pending[i].candidateTypes[c] == ioTypeId) {
-        matches = true;
-        break;
-      }
+    if (_monitorMatches(_monitors[idx], _attached[i].ioTypeId)) {
+      _bindLwp3Port(_attached[i].port, _attached[i].ioTypeId);
+      return;
     }
-    if (!matches) {
-      continue;
-    }
-
-    if (_pending[i].portGiven && _pending[i].requestedPort != port) {
-      printf("%s: expected device attached on a different port than given - using port %d\n",
-             _pending[i].label, port);
-    }
-
-    // This runs from inside the notification callback (attach event -> _recordAttached()
-    // -> here), so the actual subscribe write can't happen yet - writing to the BLE
-    // characteristic from within the notification callback exhausts the NimBLE stack's
-    // buffer pool (same reason the port re-arm logic is deferred). Reuse that exact
-    // mechanism: set up the subscription and flag it, and handleConnection() will send
-    // the real request shortly after, from the main loop.
-    int idx = _allocSubscription(port);
-    if (idx >= 0) {
-      _subscriptions[idx].mode = _pending[i].mode;
-      _subscriptions[idx].handler = _pending[i].callback;
-      _subscriptions[idx].reArmPending = true;
-    }
-    _pending[i].waiting = false;
   }
+
+  // Nothing to go on yet. The subscription stays on file, so the next attach event binds
+  // it wherever the device really turns up.
+  printf("%s: no matching device attached yet - will start listening automatically once "
+         "one does\n", label);
 }
 
 // onDistanceChanged()/onTiltChanged() work on both protocols: WeDo 2.0 (via
@@ -988,15 +1031,20 @@ void PoweredUp::stopMonitoring(int port) {
     }
   }
 
-  // LWP3 side
+  // LWP3 side - the standing subscriptions bound to this port go too, or the next attach
+  // event would rebind the port right back.
   int idx = _findSubscription(p);
   if (idx >= 0) {
     if (bleProtocol(_slot) == BLE_PROTOCOL_LWP3) {
       _sendPortInputFormatSetup(p, _subscriptions[idx].mode, false);
     }
-    _subscriptions[idx].inUse = false;
-    _subscriptions[idx].handler = nullptr;
-    _subscriptions[idx].reArmPending = false;
+    _subscriptions[idx] = PortSubscription();
+  }
+  for (uint8_t i = 0; i < MAX_MONITOR_REQUESTS; i++) {
+    if (_monitors[i].inUse &&
+        (_monitors[i].port == (int8_t)p || _monitors[i].boundPort == (int8_t)p)) {
+      _monitors[i] = MonitorRequest();
+    }
   }
 
   // Any port() handle for this port becomes stale (its monitoring, if any, just stopped).
@@ -1029,9 +1077,10 @@ void PoweredUp::stopMonitoring() {
     if (bleProtocol(_slot) == BLE_PROTOCOL_LWP3) {
       _sendPortInputFormatSetup(_subscriptions[i].port, _subscriptions[i].mode, false);
     }
-    _subscriptions[i].inUse = false;
-    _subscriptions[i].handler = nullptr;
-    _subscriptions[i].reArmPending = false;
+    _subscriptions[i] = PortSubscription();
+  }
+  for (uint8_t i = 0; i < MAX_MONITOR_REQUESTS; i++) {
+    _monitors[i] = MonitorRequest();
   }
 
   if (_onButtonPressed || _onButtonReleased) {
@@ -1243,8 +1292,9 @@ void PoweredUp::_handleLwp3Notification(uint8_t* data, int size) {
       _recordAttached(port, ioTypeId);
 
       // The hub drops a port's input format subscription whenever its device detaches,
-      // so flag it for re-arming if something previously subscribed to this port. The
-      // actual re-subscribe write happens later in handleConnection(), not here -
+      // so flag it for re-arming if something is still subscribed to this port. Covers
+      // monitorInput()'s subscriptions, which _bindLwp3Port() deliberately leaves alone.
+      // The actual re-subscribe write happens later in handleConnection(), not here -
       // writing to the BLE characteristic from within this notification callback
       // exhausts the NimBLE stack's buffer pool.
       int idx = _findSubscription(port);
@@ -1253,6 +1303,16 @@ void PoweredUp::_handleLwp3Notification(uint8_t* data, int size) {
       }
     } else if (event == 0x00) {
       printf("LWP3 device detached from port %d\n", port);
+
+      // Forget what was here, or port() comparisons, _findAttachedPort() and the
+      // "already attached?" check in _monitorWithFallback() would all keep answering
+      // with a device that's been unplugged.
+      for (uint8_t i = 0; i < MAX_ATTACHED_DEVICES; i++) {
+        if (_attached[i].inUse && _attached[i].port == port) {
+          _attached[i] = AttachedDeviceInfo();
+        }
+      }
+      _releaseLwp3Port(port);
     }
     return;
   }
@@ -1403,6 +1463,11 @@ void PoweredUp::_handleWedoPortTypeNotification(uint8_t* data, int size) {
   if (!attached) {
     printf("WeDo device detached from port %d\n", port);
     _wedoAttachedDevice[idx] = 0;
+    for (uint8_t i = 0; i < MAX_WEDO_SUBSCRIPTIONS; i++) {
+      if (_wedoSubscriptions[i].inUse && _wedoSubscriptions[i].boundPort == (int8_t)idx) {
+        _wedoSubscriptions[i].boundPort = -1;
+      }
+    }
     // The port's configuration belongs to the device that just left. Standing
     // subscriptions live in _wedoSubscriptions, so whatever gets plugged in next is
     // bound from there rather than from whatever happened to be here before.

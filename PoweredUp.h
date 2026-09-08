@@ -278,7 +278,7 @@ class PoweredUp {
   private:
     static const uint8_t MAX_SUBSCRIPTIONS = 8;
     static const uint8_t MAX_ATTACHED_DEVICES = 8;
-    static const uint8_t MAX_PENDING_MONITORS = 4;
+    static const uint8_t MAX_MONITOR_REQUESTS = 4;
     static const uint8_t MAX_DISCOVERY_QUEUE = 8;
     static const uint8_t MAX_CANDIDATE_TYPES = 4;
     static const uint8_t MAX_PORTS = 8;                // port() handles
@@ -295,6 +295,10 @@ class PoweredUp {
       uint8_t mode = 0;
       RawInputHandler handler;
       bool reArmPending = false; // re-subscribe needed - the hub drops it whenever a port's device detaches
+      // True when a standing MonitorRequest below put this here, so a detach can release
+      // it again. A subscription made by monitorInput() directly is left alone instead -
+      // that escape hatch names a port explicitly and keeps it across a replug.
+      bool fromMonitor = false;
     };
 
     // Every port we've seen something attach to, and what it was (IO Type ID) - lets
@@ -305,12 +309,14 @@ class PoweredUp {
       uint16_t ioTypeId = 0;
     };
 
-    // A monitor call waiting for a matching device to attach (either no port was given,
-    // or the given port didn't have a match yet).
-    struct PendingMonitor {
-      bool waiting = false;
-      bool portGiven = false;
-      uint8_t requestedPort = 0;
+    // An LWP3 sensor subscription the sketch has declared, kept for the lifetime of the
+    // object rather than consumed by the first matching attach event. Devices move
+    // between ports, so every attach re-binds from this list and every detach releases
+    // the port again - the same standing-declaration model as WedoSubscription below.
+    struct MonitorRequest {
+      bool inUse = false;
+      int8_t port = -1;      // -1 = whichever port it turns up on; else the port named
+      int8_t boundPort = -1; // the port it currently drives, or -1 if it isn't bound
       uint8_t mode = 0;
       RawInputHandler callback;
       uint16_t candidateTypes[MAX_CANDIDATE_TYPES] = {0, 0, 0, 0};
@@ -319,7 +325,7 @@ class PoweredUp {
     };
 
     // Every WeDo 2.0 sensor subscription the sketch has declared, kept for the lifetime
-    // of the object. Unlike LWP3's PendingMonitor above - which is consumed the moment
+    // of the object. Same standing-declaration model as MonitorRequest above, which
     // the right attach event arrives - these are standing declarations ("whenever a tilt
     // sensor is on port A, call this"). A sensor can be unplugged, swapped and replugged
     // any number of times, and each attach event re-binds from this list, so the
@@ -327,7 +333,8 @@ class PoweredUp {
     // what the sketch asked for.
     struct WedoSubscription {
       bool inUse = false;
-      int8_t port = -1; // -1 = whichever port it turns up on; 0/1 = only that port
+      int8_t port = -1;      // -1 = whichever port it turns up on; 0/1 = only that port
+      int8_t boundPort = -1; // the port it currently drives, or -1 if it isn't bound
       uint8_t deviceId = 0;
       RawInputHandler callback;
       const char* label = nullptr;
@@ -357,7 +364,7 @@ class PoweredUp {
 
     PortSubscription _subscriptions[MAX_SUBSCRIPTIONS];
     AttachedDeviceInfo _attached[MAX_ATTACHED_DEVICES];
-    PendingMonitor _pending[MAX_PENDING_MONITORS];
+    MonitorRequest _monitors[MAX_MONITOR_REQUESTS];
     PortHandle _ports[MAX_PORTS];
     RemoteButtonHandle _remoteButtons[MAX_REMOTE_BUTTON_GROUPS];
 
@@ -443,12 +450,17 @@ class PoweredUp {
     // and device. Returns its index, or -1 if the table is full.
     int _addWedoSubscription(int8_t port, uint8_t deviceId, RawInputHandler callback,
                               const char* label);
-    void _configureWedoPort(uint8_t normalizedPort, const WedoSubscription& sub);
+    void _configureWedoPort(uint8_t normalizedPort, WedoSubscription& sub);
     // Picks the subscription that should own a port now that the hub has said what's
     // plugged into it, and configures the port for it. Called on every attach event, so
     // a replugged or swapped sensor is always re-bound from scratch.
     void _bindWedoPort(uint8_t normalizedPort);
-    void _resolvePendingMonitors(uint8_t port, uint16_t ioTypeId);
+    // LWP3 counterparts of the three WeDo helpers above.
+    int _addMonitorRequest(int8_t port, const uint16_t* candidateTypes, uint8_t candidateCount,
+                            uint8_t mode, RawInputHandler callback, const char* label);
+    bool _monitorMatches(const MonitorRequest& monitor, uint16_t ioTypeId);
+    void _bindLwp3Port(uint8_t port, uint16_t ioTypeId);
+    void _releaseLwp3Port(uint8_t port);
 
     RemoteButtonHandle& _ensureRemoteButtonGroup(int portArg, bool portGiven);
     void _handleRemoteButtonRaw(RemoteButtonHandle& group, int8_t* value, int size);
